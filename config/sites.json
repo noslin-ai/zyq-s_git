@@ -1,0 +1,49 @@
+{
+  "keywords": [
+    "科技创新",
+    "科创",
+    "创新平台",
+    "重点实验室",
+    "新型研发机构",
+    "科技企业孵化器",
+    "孵化器",
+    "众创空间",
+    "中试",
+    "概念验证",
+    "创新券",
+    "科技成果转化",
+    "技术转移",
+    "科技计划",
+    "研发"
+  ],
+  "sites": [
+    {
+      "id": "jinan-science-bureau",
+      "province": "山东省",
+      "city": "济南市",
+      "department": "济南市科学技术局",
+      "base_url": "https://jnsti.jinan.gov.cn",
+      "columns": [
+        {
+          "id": "11685",
+          "name": "济南市政策法规",
+          "kind": "policy",
+          "enabled": true
+        },
+        {
+          "id": "11686",
+          "name": "规范性文件",
+          "kind": "policy",
+          "enabled": true
+        },
+        {
+          "id": "13061",
+          "name": "工作通知",
+          "kind": "notice",
+          "enabled": false
+        }
+      ]
+    }
+  ]
+}
+
