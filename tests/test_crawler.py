@@ -49,3 +49,4 @@ def test_article_prefers_list_date_and_keeps_direct_file_extension() -> None:
     article = parse_article_html(html, summary.url, summary)
     assert article.published_at == "2025-08-29"
     assert article.attachments[0].filename.endswith(".pdf")
+    assert not article.attachments[0].filename.endswith(".docx")

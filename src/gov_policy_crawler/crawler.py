@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 import re
 import time
 from datetime import datetime
@@ -136,8 +138,9 @@ class JinanCrawler:
         self.keywords = [item.casefold() for item in keywords if item.strip()]
         self.delay = max(0.0, delay)
         self.last_request_at = 0.0
+        request_timeout = min(float(timeout), 20.0)
         self.client = httpx.Client(
-            timeout=timeout,
+            timeout=httpx.Timeout(request_timeout, connect=min(request_timeout, 10.0)),
             follow_redirects=True,
             headers={
                 "User-Agent": "gov-policy-crawler-mvp/0.1 (+public-policy-research)",
@@ -149,12 +152,12 @@ class JinanCrawler:
     def close(self) -> None:
         self.client.close()
 
-    def _get(self, url: str, params: dict | None = None) -> httpx.Response:
+    def _get(self, url: str, params: dict | None = None, retries: int = 3) -> httpx.Response:
         elapsed = time.monotonic() - self.last_request_at
         if elapsed < self.delay:
             time.sleep(self.delay - elapsed)
         error: Exception | None = None
-        for attempt in range(1, 4):
+        for attempt in range(1, retries + 1):
             try:
                 response = self.client.get(url, params=params)
                 response.raise_for_status()
@@ -162,7 +165,7 @@ class JinanCrawler:
                 return response
             except (httpx.HTTPError, OSError) as exc:
                 error = exc
-                if attempt < 3:
+                if attempt < retries:
                     time.sleep(min(2.0 * attempt, 5.0))
         raise RuntimeError(f"请求失败: {url}: {error}")
 
@@ -205,27 +208,26 @@ class JinanCrawler:
         return any(keyword in haystack for keyword in self.keywords)
 
     def fetch_article(self, summary: ArticleSummary) -> Article:
-        response = self._get(summary.url)
+        response = self._get(summary.url, retries=1)
         return parse_article_html(response.text, summary.url, summary)
 
-    def download_attachment(self, attachment: Attachment, folder: Path) -> dict:
-        path = folder / safe_filename(attachment.filename)
-        if path.exists():
-            stem, suffix = path.stem, path.suffix
-            index = 2
-            while path.exists():
-                path = folder / f"{stem}_{index}{suffix}"
-                index += 1
-        digest = __import__("hashlib").sha256()
+    def download_attachment(self, attachment: Attachment, article_title: str, sequence: int) -> dict:
+        path = self.storage.next_pdf_path(article_title, sequence)
+        digest = hashlib.sha256()
         size = 0
         temp_path = path.with_suffix(path.suffix + ".part")
-        response = self._get(attachment.url)
+        response = self._get(attachment.url, retries=2)
+        first_bytes = bytearray()
         try:
             with temp_path.open("wb") as handle:
                 for chunk in response.iter_bytes(1024 * 64):
+                    if len(first_bytes) < 5:
+                        first_bytes.extend(chunk[: 5 - len(first_bytes)])
                     handle.write(chunk)
                     digest.update(chunk)
                     size += len(chunk)
+            if not first_bytes.startswith(b"%PDF"):
+                raise RuntimeError(f"下载内容不是有效 PDF: {attachment.url}")
             temp_path.replace(path)
         finally:
             if temp_path.exists():
@@ -233,6 +235,7 @@ class JinanCrawler:
         return {
             "filename": path.name,
             "path": str(path),
+            "source_filename": attachment.filename,
             "url": attachment.url,
             "size": size,
             "sha256": digest.hexdigest(),
@@ -242,33 +245,53 @@ class JinanCrawler:
     def run(
         self,
         *,
-        include_notices: bool = False,
+        include_notices: bool = True,
         include_all: bool = False,
-        max_pages: int | None = None,
-        max_articles: int | None = None,
+        max_pages: int | None = 10,
+        max_pdfs: int = 10,
         list_only: bool = False,
     ) -> dict:
-        stats = {"listed": 0, "matched": 0, "articles": 0, "attachments": 0, "errors": 0}
+        stats = {
+            "listed": 0,
+            "matched": 0,
+            "checked_articles": 0,
+            "pdfs": 0,
+            "skipped_no_pdf": 0,
+            "errors": 0,
+        }
+        summaries: list[ArticleSummary] = []
         for column in self.site.columns:
             if not column.enabled or (column.kind == "notice" and not include_notices):
                 continue
-            for summary in self.iter_summaries(column, max_pages=max_pages):
-                stats["listed"] += 1
-                if not self.matches(summary, include_all=include_all):
-                    continue
-                stats["matched"] += 1
-                if max_articles is not None and stats["matched"] > max_articles:
-                    return stats
+            summaries.extend(self.iter_summaries(column, max_pages=max_pages))
+
+        stats["listed"] = len(summaries)
+        candidates = [item for item in summaries if self.matches(item, include_all=include_all)]
+        candidates.sort(key=lambda item: item.published_at or "", reverse=True)
+        stats["matched"] = len(candidates)
+        if list_only:
+            for summary in candidates:
                 print(f"[match] {summary.published_at or 'unknown'} {summary.title}")
-                if list_only:
+            return stats
+
+        seen_pdf_urls = self._existing_pdf_urls()
+        for summary in candidates:
+            if stats["pdfs"] >= max_pdfs:
+                break
+            print(f"[check] {summary.published_at or 'unknown'} {summary.title}")
+            try:
+                article = self.fetch_article(summary)
+                stats["checked_articles"] += 1
+                pdfs = [item for item in article.attachments if item.filename.casefold().endswith(".pdf")]
+                pdfs = [item for item in pdfs if item.url not in seen_pdf_urls]
+                if not pdfs:
+                    stats["skipped_no_pdf"] += 1
                     continue
-                try:
-                    article = self.fetch_article(summary)
-                    folder = self.storage.article_dir(article.title, article.url, article.published_at)
-                    html_path, text_path = self.storage.save_article(folder, article.html, article.content)
-                    attachment_records = [self.download_attachment(item, folder) for item in article.attachments]
-                    for item in attachment_records:
-                        stats["attachments"] += 1
+                for sequence, attachment in enumerate(pdfs, start=1):
+                    if stats["pdfs"] >= max_pdfs:
+                        break
+                    seen_pdf_urls.add(attachment.url)
+                    record = self.download_attachment(attachment, article.title, sequence)
                     self.storage.append_metadata(
                         {
                             "site_id": self.site.id,
@@ -280,14 +303,27 @@ class JinanCrawler:
                             "title": article.title,
                             "published_at": article.published_at,
                             "article_url": article.url,
-                            "article_html": html_path,
-                            "article_text": text_path,
-                            "attachments": attachment_records,
+                            "pdf": record,
                             "crawled_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                         }
                     )
-                    stats["articles"] += 1
-                except Exception as exc:  # keep one broken item from stopping the whole crawl
-                    stats["errors"] += 1
-                    print(f"[error] {summary.url}: {exc}")
+                    stats["pdfs"] += 1
+            except Exception as exc:  # keep one broken item from stopping the whole crawl
+                stats["errors"] += 1
+                print(f"[error] {summary.url}: {exc}")
         return stats
+
+    def _existing_pdf_urls(self) -> set[str]:
+        seen: set[str] = set()
+        if not self.storage.metadata_path.exists():
+            return seen
+        for line in self.storage.metadata_path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            pdf = record.get("pdf", {})
+            url = pdf.get("url")
+            if url:
+                seen.add(url)
+        return seen

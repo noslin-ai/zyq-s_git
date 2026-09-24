@@ -9,15 +9,15 @@ from .crawler import JinanCrawler
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="采集济南市科技局公开政策文件及附件")
+    parser = argparse.ArgumentParser(description="采集济南市科技局最新科技政策 PDF")
     parser.add_argument("--config", type=Path, default=Path("config/sites.json"))
     parser.add_argument("--site", default="jinan-science-bureau")
     parser.add_argument("--output", type=Path, default=Path("data"))
     parser.add_argument("--delay", type=float, default=1.0, help="请求之间的间隔秒数")
     parser.add_argument("--timeout", type=float, default=30.0)
-    parser.add_argument("--max-pages", type=int, default=None)
-    parser.add_argument("--max-articles", type=int, default=None)
-    parser.add_argument("--include-notices", action="store_true", help="同时采集工作通知栏目")
+    parser.add_argument("--max-pages", type=int, default=10, help="每个栏目最多扫描页数，默认 10")
+    parser.add_argument("--max-pdfs", type=int, default=10, help="最多下载 PDF 数量，默认 10")
+    parser.add_argument("--no-notices", action="store_true", help="只采集政策法规和规范性文件")
     parser.add_argument("--all", action="store_true", dest="include_all", help="不按关键词过滤")
     parser.add_argument("--list-only", action="store_true", help="只列出匹配结果，不下载")
     return parser
@@ -38,13 +38,12 @@ def main() -> None:
     )
     try:
         stats = crawler.run(
-            include_notices=args.include_notices,
+            include_notices=not args.no_notices,
             include_all=args.include_all,
             max_pages=args.max_pages,
-            max_articles=args.max_articles,
+            max_pdfs=args.max_pdfs,
             list_only=args.list_only,
         )
     finally:
         crawler.close()
     print(json.dumps(stats, ensure_ascii=False, indent=2))
-
